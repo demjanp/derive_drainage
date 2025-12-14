@@ -6,13 +6,18 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List, Dict
 
+import geopandas as gpd
+import numpy as np
 import rasterio
+from rasterio.features import rasterize
 from rasterio.enums import Resampling
 from rasterio.warp import calculate_default_transform, reproject
 from rasterio.windows import Window, from_bounds, transform as window_transform
+from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
+from pyproj import CRS
 
 
 def reproject_dem(src_path: Path, dst_path: Path, dst_crs: str | int) -> Path:
@@ -109,3 +114,65 @@ def tile_dem(
                 tile_paths.append(tile_path)
 
     return tile_paths
+
+
+def erase_features_from_dem_tiles(
+    tile_paths: List[Path],
+    crs_obj: CRS | str | int,
+    osm_tiles: List[Path],
+    gdw_gdf_proj: gpd.GeoDataFrame,
+    reservoir_gdf_proj: gpd.GeoDataFrame,
+) -> None:
+    """
+    Rasterize OSM/GDW/reservoir features and erase them (set to NaN) from DEM tiles in-place.
+    """
+    crs = CRS.from_user_input(crs_obj)
+    osm_by_stem: Dict[str, Path] = {p.stem: p for p in osm_tiles}
+
+    for tile_path in tile_paths:
+        tile_stem = tile_path.stem
+        osm_tile_path = osm_by_stem.get(tile_stem)
+        if osm_tile_path is None:
+            osm_tile_gdf = gpd.GeoDataFrame(geometry=[], crs=crs)
+        else:
+            osm_tile_gdf = gpd.read_file(osm_tile_path)
+            if osm_tile_gdf.crs is None:
+                osm_tile_gdf = osm_tile_gdf.set_crs(crs)
+
+        with rasterio.open(tile_path) as src:
+            tile_bounds = src.bounds
+            tile_geom = box(tile_bounds.left, tile_bounds.bottom, tile_bounds.right, tile_bounds.top)
+            relevant_gdw = gdw_gdf_proj[gdw_gdf_proj.intersects(tile_geom)] if not gdw_gdf_proj.empty else gdw_gdf_proj
+            relevant_res = (
+                reservoir_gdf_proj[reservoir_gdf_proj.intersects(tile_geom)]
+                if not reservoir_gdf_proj.empty
+                else reservoir_gdf_proj
+            )
+            if (
+                osm_tile_gdf.empty
+                and (relevant_gdw is None or getattr(relevant_gdw, "empty", True))
+                and (relevant_res is None or getattr(relevant_res, "empty", True))
+            ):
+                continue
+            geoms = []
+            if not osm_tile_gdf.empty:
+                geoms.extend([g for g in osm_tile_gdf.geometry if g is not None and not g.is_empty])
+            if relevant_gdw is not None and not getattr(relevant_gdw, "empty", True):
+                geoms.extend([g for g in relevant_gdw.geometry if g is not None and not g.is_empty])
+            if relevant_res is not None and not getattr(relevant_res, "empty", True):
+                geoms.extend([g for g in relevant_res.geometry if g is not None and not g.is_empty])
+            if not geoms:
+                continue
+            mask = rasterize(
+                [(geom, 1) for geom in geoms],
+                out_shape=(src.height, src.width),
+                transform=src.transform,
+                fill=0,
+                dtype="uint8",
+            )
+            data = src.read(1).astype("float32")
+            data[mask == 1] = np.nan
+            meta = src.meta.copy()
+            meta.update({"dtype": "float32", "nodata": np.nan})
+        with rasterio.open(tile_path, "w", **meta) as dst:
+            dst.write(data, 1)

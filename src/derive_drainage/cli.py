@@ -3,27 +3,21 @@ from __future__ import annotations
 import argparse
 import logging
 import tempfile
-import zipfile
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import geopandas as gpd
-import rasterio
-import numpy as np
-from pyproj import CRS, Transformer
-from rasterio.features import rasterize
-from shapely.geometry import MultiPolygon, box
-from shapely.ops import transform
+from pyproj import CRS
 
 from derive_drainage.common.aoi import buffer_aoi, read_aoi
 from derive_drainage.common.logging import configure_logging
 from derive_drainage.common.metadata import write_metadata
-from derive_drainage.process.dem import reproject_dem, tile_dem
+from derive_drainage.process.dem import erase_features_from_dem_tiles, reproject_dem, tile_dem
 from derive_drainage.stage.copdem import stage_copdem_glo30
 from derive_drainage.stage.gdw import stage_gdw
-from derive_drainage.stage.osm import stage_osm
+from derive_drainage.stage.osm import stage_osm_tiles_for_dem
 
 LOG = logging.getLogger(__name__)
 
@@ -110,106 +104,26 @@ def run(args: argparse.Namespace) -> None:
         osm_tags = {"highway": True, "railway": True, "building": True}
 
         osm_tiles_dir = cache_dir / "osm_tiles"
-        osm_tiles_dir.mkdir(parents=True, exist_ok=True)
-        osm_tile_paths: list[Path] = []
-        to_wgs84 = Transformer.from_crs(crs_obj, CRS.from_epsg(4326), always_xy=True).transform
-
-        def _normalize_geom(geom):
-            if geom is None or geom.is_empty:
-                return []
-            if not geom.is_valid:
-                geom = geom.buffer(0)
-            if geom.is_empty:
-                return []
-            gtype = geom.geom_type
-            if gtype == "Polygon":
-                return [MultiPolygon([geom])]
-            if gtype == "MultiPolygon":
-                return [geom]
-            if gtype == "LineString":
-                return [geom]
-            if gtype == "MultiLineString":
-                return [ls for ls in geom.geoms if ls is not None and not ls.is_empty]
-            return []
-
-        for tile_path in tiles:
-            with rasterio.open(tile_path) as src:
-                tb = src.bounds
-            tile_geom = box(tb.left, tb.bottom, tb.right, tb.top)
-            tile_geom_wgs = transform(to_wgs84, tile_geom)
-            minx, miny, maxx, maxy = tile_geom_wgs.bounds
-            osm_tile_gdf = stage_osm((minx, miny, maxx, maxy), cache_dir, osm_tags)
-            if osm_tile_gdf.empty:
-                continue
-            osm_tile_proj = osm_tile_gdf.to_crs(args.crs)
-            clipped = osm_tile_proj.clip(tile_geom)
-            norm_geoms = []
-            for geom in clipped.geometry:
-                norm_geoms.extend(_normalize_geom(geom))
-            norm_geoms = [
-                g for g in norm_geoms if g.geom_type in ("MultiPolygon", "LineString")
-            ]
-            if not norm_geoms:
-                continue
-            out_gdf = gpd.GeoDataFrame(geometry=norm_geoms, crs=osm_tile_proj.crs)
-            out_path = osm_tiles_dir / f"{tile_path.stem}.gpkg"
-            out_gdf.to_file(out_path, layer="osm", driver="GPKG")
-            osm_tile_paths.append(out_path)
+        osm_tile_paths = stage_osm_tiles_for_dem(
+            tile_paths=tiles,
+            dem_crs=crs_obj,
+            cache_dir=cache_dir,
+            tags=osm_tags,
+            out_dir=osm_tiles_dir,
+        )
 
         param_dict = {}
         for key, value in vars(args).items():
             param_dict[key] = str(value) if isinstance(value, Path) else value
 
         LOG.info("Erasing OSM/GDW features from DEM tiles")
-        osm_by_stem = {p.stem: p for p in osm_tile_paths}
-        for tile_path in tiles:
-            tile_stem = tile_path.stem
-            osm_tile_path = osm_by_stem.get(tile_stem)
-            if osm_tile_path is None:
-                osm_tile_gdf = gpd.GeoDataFrame(geometry=[], crs=crs_obj)
-            else:
-                osm_tile_gdf = gpd.read_file(osm_tile_path)
-                if osm_tile_gdf.crs is None:
-                    osm_tile_gdf = osm_tile_gdf.set_crs(crs_obj)
-            with rasterio.open(tile_path) as src:
-                tile_bounds = src.bounds
-                tile_geom = box(tile_bounds.left, tile_bounds.bottom, tile_bounds.right, tile_bounds.top)
-                relevant_gdw = (
-                    gdw_gdf_proj[gdw_gdf_proj.intersects(tile_geom)] if not gdw_gdf_proj.empty else gdw_gdf_proj
-                )
-                relevant_res = (
-                    reservoir_gdf_proj[reservoir_gdf_proj.intersects(tile_geom)]
-                    if not reservoir_gdf_proj.empty
-                    else reservoir_gdf_proj
-                )
-                if (
-                    osm_tile_gdf.empty
-                    and (relevant_gdw is None or getattr(relevant_gdw, "empty", True))
-                    and (relevant_res is None or getattr(relevant_res, "empty", True))
-                ):
-                    continue
-                geoms = []
-                if not osm_tile_gdf.empty:
-                    geoms.extend([g for g in osm_tile_gdf.geometry if g is not None and not g.is_empty])
-                if relevant_gdw is not None and not getattr(relevant_gdw, "empty", True):
-                    geoms.extend([g for g in relevant_gdw.geometry if g is not None and not g.is_empty])
-                if relevant_res is not None and not getattr(relevant_res, "empty", True):
-                    geoms.extend([g for g in relevant_res.geometry if g is not None and not g.is_empty])
-                if not geoms:
-                    continue
-                mask = rasterize(
-                    [(geom, 1) for geom in geoms],
-                    out_shape=(src.height, src.width),
-                    transform=src.transform,
-                    fill=0,
-                    dtype="uint8",
-                )
-                data = src.read(1).astype("float32")
-                data[mask == 1] = np.nan
-                meta = src.meta.copy()
-                meta.update({"dtype": "float32", "nodata": np.nan})
-            with rasterio.open(tile_path, "w", **meta) as dst:
-                dst.write(data, 1)
+        erase_features_from_dem_tiles(
+            tile_paths=tiles,
+            crs_obj=crs_obj,
+            osm_tiles=osm_tile_paths,
+            gdw_gdf_proj=gdw_gdf_proj,
+            reservoir_gdf_proj=reservoir_gdf_proj,
+        )
 
         metadata = {
             "stac": {

@@ -7,12 +7,16 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List, Iterable
 
 import geopandas as gpd
 import osmnx as ox
 import pandas as pd
+import rasterio
 from tqdm import tqdm
+from pyproj import CRS, Transformer
+from shapely.geometry import MultiPolygon, box
+from shapely.ops import transform
 
 LOG = logging.getLogger(__name__)
 
@@ -127,3 +131,68 @@ def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tag
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     gdf.to_file(cache_path, driver="GPKG")
     return gdf
+
+
+def _normalize_geometries(geoms: Iterable) -> list:
+    """
+    Normalize mixed geometries into polygons/multipolygons and linestrings.
+    """
+    normalized = []
+    for geom in geoms:
+        if geom is None or geom.is_empty:
+            continue
+        if not geom.is_valid:
+            geom = geom.buffer(0)
+        if geom.is_empty:
+            continue
+        gtype = geom.geom_type
+        if gtype == "Polygon":
+            normalized.append(MultiPolygon([geom]))
+        elif gtype == "MultiPolygon":
+            normalized.append(geom)
+        elif gtype == "LineString":
+            normalized.append(geom)
+        elif gtype == "MultiLineString":
+            normalized.extend([ls for ls in geom.geoms if ls is not None and not ls.is_empty])
+    return [g for g in normalized if g.geom_type in ("MultiPolygon", "LineString")]
+
+
+def stage_osm_tiles_for_dem(
+    tile_paths: List[Path],
+    dem_crs: CRS | int | str,
+    cache_dir: Path,
+    tags: Dict[str, object],
+    out_dir: Path | None = None,
+) -> List[Path]:
+    """
+    Stage OSM data per DEM tile:
+    - For each tile, convert bounds to WGS84, fetch OSM using provided tags.
+    - Clip to tile extent, normalize geometries, and write per-tile GeoPackage.
+
+    Returns list of written tile paths.
+    """
+    out_dir = out_dir or cache_dir / "osm_tiles"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    to_wgs84 = Transformer.from_crs(CRS.from_user_input(dem_crs), CRS.from_epsg(4326), always_xy=True).transform
+    written: List[Path] = []
+
+    for tile_path in tile_paths:
+        with rasterio.open(tile_path) as src:
+            bounds = src.bounds
+        tile_geom = box(bounds.left, bounds.bottom, bounds.right, bounds.top)
+        tile_geom_wgs = transform(to_wgs84, tile_geom)
+        minx, miny, maxx, maxy = tile_geom_wgs.bounds
+        osm_tile_gdf = stage_osm((minx, miny, maxx, maxy), cache_dir, tags)
+        if osm_tile_gdf.empty:
+            continue
+        osm_tile_proj = osm_tile_gdf.to_crs(CRS.from_user_input(dem_crs))
+        clipped = osm_tile_proj.clip(tile_geom)
+        normalized = _normalize_geometries(clipped.geometry)
+        if not normalized:
+            continue
+        out_gdf = gpd.GeoDataFrame(geometry=normalized, crs=osm_tile_proj.crs)
+        out_path = out_dir / f"{tile_path.stem}.gpkg"
+        out_gdf.to_file(out_path, layer="osm", driver="GPKG")
+        written.append(out_path)
+
+    return written
