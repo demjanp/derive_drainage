@@ -12,6 +12,7 @@ from typing import Dict, Tuple
 import geopandas as gpd
 import osmnx as ox
 import pandas as pd
+from tqdm import tqdm
 
 LOG = logging.getLogger(__name__)
 
@@ -34,6 +35,11 @@ def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tag
 
     minx, miny, maxx, maxy = bbox_4326  # west, south, east, north
     west, south, east, north = minx, miny, maxx, maxy
+    cache_key = f"osm_{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}.gpkg"
+    cache_path = cache_dir / cache_key
+    if cache_path.exists():
+        return gpd.read_file(cache_path)
+
     fetch = getattr(ox.features, "features_from_bbox", None)
     if not callable(fetch):
         fetch = getattr(ox, "features_from_bbox", None)
@@ -60,16 +66,20 @@ def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tag
     )
 
     fragments: list[gpd.GeoDataFrame] = []
+    subtile_bboxes: list[Tuple[float, float, float, float]] = []
     for i in range(subdivisions):
         sub_s = south + i * lat_step
         sub_n = north if i == subdivisions - 1 else sub_s + lat_step
         for j in range(subdivisions):
             sub_w = west + j * lon_step
             sub_e = east if j == subdivisions - 1 else sub_w + lon_step
-            gdf_sub = fetch((sub_w, sub_s, sub_e, sub_n), tags)
-            if gdf_sub is None or getattr(gdf_sub, "empty", True):
-                continue
-            fragments.append(gdf_sub)
+            subtile_bboxes.append((sub_w, sub_s, sub_e, sub_n))
+
+    for sub_w, sub_s, sub_e, sub_n in tqdm(subtile_bboxes, desc="OSM subqueries", unit="tile"):
+        gdf_sub = fetch((sub_w, sub_s, sub_e, sub_n), tags)
+        if gdf_sub is None or getattr(gdf_sub, "empty", True):
+            continue
+        fragments.append(gdf_sub)
 
     if not fragments:
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
@@ -106,11 +116,14 @@ def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tag
     gdf = gdf[gdf.geometry.notna()].copy()
 
     if gdf.empty:
-        return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+        gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
     if gdf.crs is None:
         gdf = gdf.set_crs("EPSG:4326", allow_override=True)
     else:
         gdf = gdf.to_crs("EPSG:4326")
 
-    return gdf.reset_index(drop=True)
+    gdf = gdf.reset_index(drop=True)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    gdf.to_file(cache_path, driver="GPKG")
+    return gdf

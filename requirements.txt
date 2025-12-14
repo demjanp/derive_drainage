@@ -7,3 +7,4 @@ pandas>=2.0
 beautifulsoup4>=4.12
 osmnx>=1.9
 pyproj>=3.5
+tqdm>=4.66

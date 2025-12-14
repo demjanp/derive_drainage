@@ -67,17 +67,27 @@ def stage_gdw(aoi_geom_4326, gdw_url: str, tmpdir: Path, cache_dir: Path) -> Dic
         zf.extractall(extract_dir)
     shp_archives = list(extract_dir.rglob("*shp.zip"))
     if shp_archives:
-        nested_dir = extract_dir / "gdw_shp"
-        nested_dir.mkdir(exist_ok=True)
+        shp_root = extract_dir / "gdw_shp"
+        shp_root.mkdir(exist_ok=True)
         with zipfile.ZipFile(shp_archives[0], "r") as inner:
-            inner.extractall(nested_dir)
-        shp_files = list(nested_dir.rglob("*.shp"))
+            inner.extractall(shp_root)
     else:
-        shp_files = list(extract_dir.rglob("*.shp"))
-    shp_path = shp_files[0]
+        shp_root = extract_dir
+    shp_files = list(shp_root.rglob("*.shp"))
+    if not shp_files:
+        raise RuntimeError(f"No shapefiles found in GDW archive {zip_path}")
+    dam_candidate = next((p for p in shp_files if "dam" in p.stem.lower()), None)
+    shp_path = dam_candidate or shp_files[0]
     gdf = gpd.read_file(shp_path)
     gdf = gdf.to_crs(epsg=4326)
     clipped = gdf.clip(gpd.GeoDataFrame(geometry=[aoi_geom_4326], crs="EPSG:4326"))
+
+    reservoir_files = [p for p in shp_files if "reservoir" in p.stem.lower()]
+    if reservoir_files:
+        res_gdf = gpd.read_file(reservoir_files[0]).to_crs(epsg=4326)
+        res_clipped = res_gdf.clip(gpd.GeoDataFrame(geometry=[aoi_geom_4326], crs="EPSG:4326"))
+    else:
+        res_clipped = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
     out_path = Path(tmpdir) / "gdw_clipped.gpkg"
     clipped.to_file(out_path, layer="dams", driver="GPKG")
@@ -85,6 +95,7 @@ def stage_gdw(aoi_geom_4326, gdw_url: str, tmpdir: Path, cache_dir: Path) -> Dic
     return {
         "path": out_path,
         "gdf": clipped,
+        "reservoir_gdf": res_clipped,
         "source_zip": zip_path,
         "feature_count": len(clipped),
     }

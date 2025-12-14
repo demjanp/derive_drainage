@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 import tempfile
+import zipfile
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,9 @@ from typing import Optional
 
 import geopandas as gpd
 import rasterio
+import numpy as np
 from pyproj import CRS, Transformer
+from rasterio.features import rasterize
 from shapely.geometry import MultiPolygon, box
 from shapely.ops import transform
 
@@ -96,6 +99,11 @@ def run(args: argparse.Namespace) -> None:
         LOG.info("Staging GDW dams")
         gdw_started = datetime.utcnow().isoformat() + "Z"
         gdw_info = stage_gdw(buffered_wgs84, args.gdw_url, tmpdir, cache_dir)
+        gdw_gdf_proj = gdw_info["gdf"].to_crs(crs_obj) if not gdw_info["gdf"].empty else gdw_info["gdf"]
+        reservoir_gdf = gdw_info.get("reservoir_gdf")
+        reservoir_gdf_proj = (
+            reservoir_gdf.to_crs(crs_obj) if reservoir_gdf is not None and not reservoir_gdf.empty else gpd.GeoDataFrame(geometry=[], crs=crs_obj)
+        )
 
         LOG.info("Staging OSM features per DEM tile (highway, railway, building)")
         osm_started = datetime.utcnow().isoformat() + "Z"
@@ -151,6 +159,57 @@ def run(args: argparse.Namespace) -> None:
         param_dict = {}
         for key, value in vars(args).items():
             param_dict[key] = str(value) if isinstance(value, Path) else value
+
+        LOG.info("Erasing OSM/GDW features from DEM tiles")
+        osm_by_stem = {p.stem: p for p in osm_tile_paths}
+        for tile_path in tiles:
+            tile_stem = tile_path.stem
+            osm_tile_path = osm_by_stem.get(tile_stem)
+            if osm_tile_path is None:
+                osm_tile_gdf = gpd.GeoDataFrame(geometry=[], crs=crs_obj)
+            else:
+                osm_tile_gdf = gpd.read_file(osm_tile_path)
+                if osm_tile_gdf.crs is None:
+                    osm_tile_gdf = osm_tile_gdf.set_crs(crs_obj)
+            with rasterio.open(tile_path) as src:
+                tile_bounds = src.bounds
+                tile_geom = box(tile_bounds.left, tile_bounds.bottom, tile_bounds.right, tile_bounds.top)
+                relevant_gdw = (
+                    gdw_gdf_proj[gdw_gdf_proj.intersects(tile_geom)] if not gdw_gdf_proj.empty else gdw_gdf_proj
+                )
+                relevant_res = (
+                    reservoir_gdf_proj[reservoir_gdf_proj.intersects(tile_geom)]
+                    if not reservoir_gdf_proj.empty
+                    else reservoir_gdf_proj
+                )
+                if (
+                    osm_tile_gdf.empty
+                    and (relevant_gdw is None or getattr(relevant_gdw, "empty", True))
+                    and (relevant_res is None or getattr(relevant_res, "empty", True))
+                ):
+                    continue
+                geoms = []
+                if not osm_tile_gdf.empty:
+                    geoms.extend([g for g in osm_tile_gdf.geometry if g is not None and not g.is_empty])
+                if relevant_gdw is not None and not getattr(relevant_gdw, "empty", True):
+                    geoms.extend([g for g in relevant_gdw.geometry if g is not None and not g.is_empty])
+                if relevant_res is not None and not getattr(relevant_res, "empty", True):
+                    geoms.extend([g for g in relevant_res.geometry if g is not None and not g.is_empty])
+                if not geoms:
+                    continue
+                mask = rasterize(
+                    [(geom, 1) for geom in geoms],
+                    out_shape=(src.height, src.width),
+                    transform=src.transform,
+                    fill=0,
+                    dtype="uint8",
+                )
+                data = src.read(1).astype("float32")
+                data[mask == 1] = np.nan
+                meta = src.meta.copy()
+                meta.update({"dtype": "float32", "nodata": np.nan})
+            with rasterio.open(tile_path, "w", **meta) as dst:
+                dst.write(data, 1)
 
         metadata = {
             "stac": {
