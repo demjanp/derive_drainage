@@ -172,8 +172,19 @@ def erase_features_from_dem_tiles(
                 fill=0,
                 dtype="uint8",
             )
+            # Dilate mask by one pixel in all directions so erased corridors are at least 3 pixels wide.
+            dilated = mask.copy()
+            dilated[1:, :] |= mask[:-1, :]
+            dilated[:-1, :] |= mask[1:, :]
+            dilated[:, 1:] |= mask[:, :-1]
+            dilated[:, :-1] |= mask[:, 1:]
+            dilated[1:, 1:] |= mask[:-1, :-1]
+            dilated[:-1, :-1] |= mask[1:, 1:]
+            dilated[1:, :-1] |= mask[:-1, 1:]
+            dilated[:-1, 1:] |= mask[1:, :-1]
+
             data = src.read(1).astype("float32")
-            data[mask == 1] = np.nan
+            data[dilated == 1] = np.nan
             meta = src.meta.copy()
             meta.update({"dtype": "float32", "nodata": np.nan})
         with rasterio.open(tile_path, "w", **meta) as dst:

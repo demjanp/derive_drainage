@@ -13,6 +13,7 @@ Key options:
 - `--stream-accum-threshold`: Flow accumulation threshold (cells) to start a stream (default 400).
 - `--min-stream-length-m`: Minimum stream segment length to keep (meters, default 100).
 - `--keep-temp`: Keep the temporary directory instead of removing it.
+- `-no-removal`: Skip OSM staging and DEM conditioning (erase/fill); useful if you want raw DEM tiles.
 
 ## Outputs (in `-output`)
 

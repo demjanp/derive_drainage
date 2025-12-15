@@ -42,6 +42,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--keep-temp", dest="keep_temp", action="store_true")
     parser.add_argument("--stream-accum-threshold", dest="stream_accum_threshold", type=int, default=400, help="Flow accumulation threshold (cells) to start streams")
     parser.add_argument("--min-stream-length-m", dest="min_stream_length_m", type=float, default=100.0, help="Minimum stream length to retain (meters)")
+    parser.add_argument("-no-removal", dest="no_removal", action="store_true", help="Skip OSM staging and DEM conditioning (erase/fill)")
 
     return parser.parse_args(argv)
 
@@ -87,14 +88,18 @@ def run(args: argparse.Namespace) -> None:
             LOG.info("Reprojecting CopDEM to CRS %s", args.crs)
             reproject_dem(copdem_info["clipped"], dem_reproj, args.crs)
 
-            LOG.info("Generating DEM tiles (10x10 km with 2.5 km overlap) into %s", tiles_dir)
-            tiles = tile_dem(
-                dem_path=dem_reproj,
-                aoi_geom_proj=aoi_proj_geom,
-                out_dir=tiles_dir,
-                tile_size_m=tile_size_m,
-                overlap_m=overlap_m,
-            )
+            if args.no_removal:
+                LOG.info("Skipping DEM tiling because -no-removal was set; using single reprojected mosaic")
+                tiles = [dem_reproj]
+            else:
+                LOG.info("Generating DEM tiles (10x10 km with 2.5 km overlap) into %s", tiles_dir)
+                tiles = tile_dem(
+                    dem_path=dem_reproj,
+                    aoi_geom_proj=aoi_proj_geom,
+                    out_dir=tiles_dir,
+                    tile_size_m=tile_size_m,
+                    overlap_m=overlap_m,
+                )
 
         LOG.info("Staging GDW dams")
         gdw_started = datetime.utcnow().isoformat() + "Z"
@@ -105,37 +110,44 @@ def run(args: argparse.Namespace) -> None:
             reservoir_gdf.to_crs(crs_obj) if reservoir_gdf is not None and not reservoir_gdf.empty else gpd.GeoDataFrame(geometry=[], crs=crs_obj)
         )
 
-        LOG.info("Staging OSM features per DEM tile (highway, railway, building)")
-        osm_started = datetime.utcnow().isoformat() + "Z"
-        osm_tags = {"highway": True, "railway": True, "building": True}
+        if args.no_removal:
+            LOG.info("Skipping OSM staging and DEM conditioning because -no-removal was set")
+            osm_started = None
+            osm_tile_paths = []
+        else:
+            LOG.info("Staging OSM features per DEM tile (highway, railway, building)")
+            osm_started = datetime.utcnow().isoformat() + "Z"
+            osm_tags = {"highway": True, "railway": True, "building": True}
 
-        osm_tiles_dir = cache_dir / "osm_tiles"
-        osm_tile_paths = stage_osm_tiles_for_dem(
-            tile_paths=tiles,
-            dem_crs=crs_obj,
-            cache_dir=cache_dir,
-            tags=osm_tags,
-            out_dir=osm_tiles_dir,
-        )
+            osm_tiles_dir = cache_dir / "osm_tiles"
+            osm_tile_paths = stage_osm_tiles_for_dem(
+                tile_paths=tiles,
+                dem_crs=crs_obj,
+                cache_dir=cache_dir,
+                tags=osm_tags,
+                out_dir=osm_tiles_dir,
+            )
 
         param_dict = {}
         for key, value in vars(args).items():
             param_dict[key] = str(value) if isinstance(value, Path) else value
 
-        LOG.info("Erasing OSM/GDW features from DEM tiles")
-        erase_features_from_dem_tiles(
-            tile_paths=tiles,
-            crs_obj=crs_obj,
-            osm_tiles=osm_tile_paths,
-            gdw_gdf_proj=gdw_gdf_proj,
-            reservoir_gdf_proj=reservoir_gdf_proj,
-        )
+        if not args.no_removal:
+            LOG.info("Erasing OSM/GDW features from DEM tiles")
+            erase_features_from_dem_tiles(
+                tile_paths=tiles,
+                crs_obj=crs_obj,
+                osm_tiles=osm_tile_paths,
+                gdw_gdf_proj=gdw_gdf_proj,
+                reservoir_gdf_proj=reservoir_gdf_proj,
+            )
 
-        LOG.info("Filling erased voids via natural neighbor interpolation")
-        fill_tile_nodata_natural_neighbor(tile_paths=tiles)
+            LOG.info("Filling erased voids via natural neighbor interpolation")
+            fill_tile_nodata_natural_neighbor(tile_paths=tiles)
 
-        LOG.info("Clipping DEM tiles to core (10x10 km) by removing overlap")
-        clip_tiles_to_core(tile_paths=tiles, overlap_m=overlap_m)
+        if not args.no_removal:
+            LOG.info("Clipping DEM tiles to core (10x10 km) by removing overlap")
+            clip_tiles_to_core(tile_paths=tiles, overlap_m=overlap_m)
 
         LOG.info("Generating drainage network from DEM tiles")
         drainage = derive_drainage_from_tiles(
@@ -179,7 +191,7 @@ def run(args: argparse.Namespace) -> None:
                 "timestamp": gdw_started,
             },
             "osm": {
-                "feature_count": len(osm_tile_paths),
+                "feature_count": len(osm_tile_paths) if osm_started else 0,
                 "timestamp": osm_started,
             },
             "parameters": param_dict,
