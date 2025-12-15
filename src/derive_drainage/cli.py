@@ -14,7 +14,7 @@ from pyproj import CRS
 from derive_drainage.common.aoi import buffer_aoi, read_aoi
 from derive_drainage.common.logging import configure_logging
 from derive_drainage.common.metadata import write_metadata
-from derive_drainage.process.dem import erase_features_from_dem_tiles, reproject_dem, tile_dem
+from derive_drainage.process.dem import erase_features_from_dem_tiles, fill_tile_nodata_natural_neighbor, reproject_dem, tile_dem
 from derive_drainage.stage.copdem import stage_copdem_glo30
 from derive_drainage.stage.gdw import stage_gdw
 from derive_drainage.stage.osm import stage_osm_tiles_for_dem
@@ -124,6 +124,9 @@ def run(args: argparse.Namespace) -> None:
             gdw_gdf_proj=gdw_gdf_proj,
             reservoir_gdf_proj=reservoir_gdf_proj,
         )
+
+        LOG.info("Filling erased voids via natural neighbor interpolation")
+        fill_tile_nodata_natural_neighbor(tile_paths=tiles)
 
         metadata = {
             "stac": {

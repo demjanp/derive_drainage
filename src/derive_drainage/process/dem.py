@@ -18,6 +18,7 @@ from rasterio.windows import Window, from_bounds, transform as window_transform
 from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 from pyproj import CRS
+import matplotlib.tri as mtri
 
 
 def reproject_dem(src_path: Path, dst_path: Path, dst_crs: str | int) -> Path:
@@ -176,3 +177,45 @@ def erase_features_from_dem_tiles(
             meta.update({"dtype": "float32", "nodata": np.nan})
         with rasterio.open(tile_path, "w", **meta) as dst:
             dst.write(data, 1)
+
+
+def fill_tile_nodata_natural_neighbor(tile_paths: List[Path]) -> None:
+    """
+    Fill NaN holes in DEM tiles using natural neighbor interpolation in-place.
+    """
+    for tile_path in tile_paths:
+        with rasterio.open(tile_path) as src:
+            band = src.read(1).astype("float32")
+            nodata_val = src.nodata
+            mask = np.isnan(band) if nodata_val is None else (band == nodata_val) | np.isnan(band)
+            if not mask.any():
+                continue
+            valid_mask = ~mask
+            if not valid_mask.any():
+                raise ValueError(f"Tile {tile_path} contains only NaN after erasure; cannot interpolate.")
+
+            rows_valid, cols_valid = np.nonzero(valid_mask)
+            xs_valid, ys_valid = rasterio.transform.xy(src.transform, rows_valid, cols_valid)
+            values = band[rows_valid, cols_valid]
+
+            rows_target, cols_target = np.nonzero(mask)
+            xs_target, ys_target = rasterio.transform.xy(src.transform, rows_target, cols_target)
+
+            points = np.column_stack([np.asarray(xs_valid), np.asarray(ys_valid)])
+            targets = np.column_stack([np.asarray(xs_target), np.asarray(ys_target)])
+
+            triangulation = mtri.Triangulation(points[:, 0], points[:, 1])
+            interpolator = mtri.LinearTriInterpolator(triangulation, values)
+            filled_values = interpolator(targets[:, 0], targets[:, 1])
+            if np.isnan(filled_values).any():
+                raise RuntimeError(f"Natural neighbor interpolation left NaNs in tile {tile_path}")
+
+            filled_band = band.copy()
+            filled_band[rows_target, cols_target] = filled_values
+            meta = src.meta.copy()
+            meta.update({"dtype": "float32", "nodata": None})
+
+        tmp_path = tile_path.with_suffix(".tmp_fill.tif")
+        with rasterio.open(tmp_path, "w", **meta) as dst:
+            dst.write(filled_band, 1)
+        tmp_path.replace(tile_path)

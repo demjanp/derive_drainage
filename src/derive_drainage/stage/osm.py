@@ -31,6 +31,7 @@ def _configure_osmnx(cache_dir: Path) -> None:
 def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tags: Dict[str, object]) -> gpd.GeoDataFrame:
     """
     Fetch OSM features intersecting bbox (minx, miny, maxx, maxy) using provided tags.
+    Keep roads with railway present or highway in {motorway, primary}, and keep buildings.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
     overpass_cache = cache_dir / "osm_cache"
@@ -39,7 +40,7 @@ def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tag
 
     minx, miny, maxx, maxy = bbox_4326  # west, south, east, north
     west, south, east, north = minx, miny, maxx, maxy
-    cache_key = f"osm_{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}.gpkg"
+    cache_key = f"osm_filtered_{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}.gpkg"
     cache_path = cache_dir / cache_key
     if cache_path.exists():
         return gpd.read_file(cache_path)
@@ -118,6 +119,12 @@ def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tag
 
     gdf["geometry"] = gdf.geometry.map(_fix_geom)
     gdf = gdf[gdf.geometry.notna()].copy()
+
+    railway_col = gdf["railway"] if "railway" in gdf.columns else pd.Series(False, index=gdf.index)
+    highway_col = gdf["highway"] if "highway" in gdf.columns else pd.Series("", index=gdf.index)
+    building_col = gdf["building"] if "building" in gdf.columns else pd.Series("", index=gdf.index)
+    mask_keep = railway_col.notna() | highway_col.isin(["motorway", "primary"]) | building_col.notna()
+    gdf = gdf[mask_keep].copy()
 
     if gdf.empty:
         gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
