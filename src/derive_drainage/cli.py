@@ -15,6 +15,8 @@ from derive_drainage.common.aoi import buffer_aoi, read_aoi
 from derive_drainage.common.logging import configure_logging
 from derive_drainage.common.metadata import write_metadata
 from derive_drainage.process.dem import clip_tiles_to_core, erase_features_from_dem_tiles, fill_tile_nodata_natural_neighbor, reproject_dem, tile_dem
+from derive_drainage.process.hydro import derive_drainage_from_tiles
+from derive_drainage.process.vectorize import stream_mask_to_lines
 from derive_drainage.stage.copdem import stage_copdem_glo30
 from derive_drainage.stage.gdw import stage_gdw
 from derive_drainage.stage.osm import stage_osm_tiles_for_dem
@@ -38,6 +40,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--stac-url", dest="stac_url", default=DEFAULT_STAC_URL)
     parser.add_argument("--collection", dest="collection", default=DEFAULT_COLLECTION)
     parser.add_argument("--keep-temp", dest="keep_temp", action="store_true")
+    parser.add_argument("--stream-accum-threshold", dest="stream_accum_threshold", type=int, default=400, help="Flow accumulation threshold (cells) to start streams")
+    parser.add_argument("--min-stream-length-m", dest="min_stream_length_m", type=float, default=100.0, help="Minimum stream length to retain (meters)")
 
     return parser.parse_args(argv)
 
@@ -133,6 +137,33 @@ def run(args: argparse.Namespace) -> None:
         LOG.info("Clipping DEM tiles to core (10x10 km) by removing overlap")
         clip_tiles_to_core(tile_paths=tiles, overlap_m=overlap_m)
 
+        LOG.info("Generating drainage network from DEM tiles")
+        drainage = derive_drainage_from_tiles(
+            tile_paths=tiles,
+            crs_obj=crs_obj,
+            output_dir=output_dir,
+            stream_threshold_cells=args.stream_accum_threshold,
+            min_stream_length_m=args.min_stream_length_m,
+        )
+
+        streams_path = output_dir / "streams.gpkg"
+        streams_gdf = stream_mask_to_lines(
+            stream_mask=drainage["stream_mask"],
+            transform=drainage["transform"],
+            crs_obj=drainage["crs"],
+            flow_accum=drainage["flow_accum_array"],
+            cell_area=drainage["cell_area"],
+            min_length_m=args.min_stream_length_m,
+        )
+        streams_written = None
+        if streams_gdf.empty:
+            LOG.warning("No stream segments found at threshold %d cells", args.stream_accum_threshold)
+        else:
+            streams_path.parent.mkdir(parents=True, exist_ok=True)
+            streams_gdf.to_file(streams_path, layer="streams", driver="GPKG")
+            streams_written = streams_path
+            LOG.info("Wrote %d stream segments to %s", len(streams_gdf), streams_path)
+
         metadata = {
             "stac": {
                 "endpoint": args.stac_url,
@@ -157,6 +188,11 @@ def run(args: argparse.Namespace) -> None:
                 "reprojected_dem": str(dem_reproj) if dem_reproj.exists() else None,
                 "dem_tiles": [str(p) for p in tiles],
                 "osm_tiles": [str(p) for p in osm_tile_paths],
+                "dem_mosaic": str(drainage.get("dem_mosaic")) if drainage.get("dem_mosaic") else None,
+                "dem_filled": str(drainage.get("filled_dem")) if drainage.get("filled_dem") else None,
+                "flow_direction": str(drainage.get("flow_dir")) if drainage.get("flow_dir") else None,
+                "flow_accumulation": str(drainage.get("flow_accum")) if drainage.get("flow_accum") else None,
+                "streams": str(streams_written) if streams_written else None,
             },
         }
         write_metadata(output_dir, metadata)

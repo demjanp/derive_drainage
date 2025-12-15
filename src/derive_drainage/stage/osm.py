@@ -17,6 +17,7 @@ from tqdm import tqdm
 from pyproj import CRS, Transformer
 from shapely.geometry import MultiPolygon, box
 from shapely.ops import transform
+from osmnx._errors import InsufficientResponseError
 
 LOG = logging.getLogger(__name__)
 
@@ -81,7 +82,11 @@ def stage_osm(bbox_4326: Tuple[float, float, float, float], cache_dir: Path, tag
             subtile_bboxes.append((sub_w, sub_s, sub_e, sub_n))
 
     for sub_w, sub_s, sub_e, sub_n in tqdm(subtile_bboxes, desc="OSM subqueries", unit="tile"):
-        gdf_sub = fetch((sub_w, sub_s, sub_e, sub_n), tags)
+        try:
+            gdf_sub = fetch((sub_w, sub_s, sub_e, sub_n), tags)
+        except InsufficientResponseError:
+            LOG.info("No OSM features returned for sub-bbox (%.6f, %.6f, %.6f, %.6f); skipping", sub_w, sub_s, sub_e, sub_n)
+            continue
         if gdf_sub is None or getattr(gdf_sub, "empty", True):
             continue
         fragments.append(gdf_sub)

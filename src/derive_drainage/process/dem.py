@@ -19,6 +19,7 @@ from shapely.geometry import box
 from shapely.geometry.base import BaseGeometry
 from pyproj import CRS
 import matplotlib.tri as mtri
+from tqdm import tqdm
 
 
 def reproject_dem(src_path: Path, dst_path: Path, dst_crs: str | int) -> Path:
@@ -183,7 +184,7 @@ def fill_tile_nodata_natural_neighbor(tile_paths: List[Path]) -> None:
     """
     Fill NaN holes in DEM tiles using natural neighbor interpolation in-place.
     """
-    for tile_path in tile_paths:
+    for tile_path in tqdm(tile_paths, desc="Fill nodata (tiles)", unit="tile"):
         with rasterio.open(tile_path) as src:
             band = src.read(1).astype("float32")
             nodata_val = src.nodata
