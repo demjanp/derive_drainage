@@ -219,3 +219,38 @@ def fill_tile_nodata_natural_neighbor(tile_paths: List[Path]) -> None:
         with rasterio.open(tmp_path, "w", **meta) as dst:
             dst.write(filled_band, 1)
         tmp_path.replace(tile_path)
+
+
+def clip_tiles_to_core(tile_paths: List[Path], overlap_m: float) -> None:
+    """
+    Clip overlapped tiles back to their core (remove overlap on all sides) in-place.
+    """
+    for tile_path in tile_paths:
+        with rasterio.open(tile_path) as src:
+            bounds = src.bounds
+            core_left = bounds.left + overlap_m
+            core_right = bounds.right - overlap_m
+            core_bottom = bounds.bottom + overlap_m
+            core_top = bounds.top - overlap_m
+            if core_left >= core_right or core_bottom >= core_top:
+                raise ValueError(f"Overlap {overlap_m} exceeds tile extent for {tile_path}")
+            core_window = from_bounds(core_left, core_bottom, core_right, core_top, src.transform)
+            dataset_window = Window(col_off=0, row_off=0, width=src.width, height=src.height)
+            window = core_window.intersection(dataset_window).round_offsets().round_lengths()
+            if window.width <= 0 or window.height <= 0:
+                raise ValueError(f"Computed core window is empty for {tile_path}")
+            transform = window_transform(window, src.transform)
+            meta = src.meta.copy()
+            meta.update(
+                {
+                    "transform": transform,
+                    "width": int(window.width),
+                    "height": int(window.height),
+                }
+            )
+            data = src.read(window=window)
+
+        tmp_path = tile_path.with_suffix(".tmp_core.tif")
+        with rasterio.open(tmp_path, "w", **meta) as dst:
+            dst.write(data)
+        tmp_path.replace(tile_path)

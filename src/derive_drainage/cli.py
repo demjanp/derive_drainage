@@ -14,7 +14,7 @@ from pyproj import CRS
 from derive_drainage.common.aoi import buffer_aoi, read_aoi
 from derive_drainage.common.logging import configure_logging
 from derive_drainage.common.metadata import write_metadata
-from derive_drainage.process.dem import erase_features_from_dem_tiles, fill_tile_nodata_natural_neighbor, reproject_dem, tile_dem
+from derive_drainage.process.dem import clip_tiles_to_core, erase_features_from_dem_tiles, fill_tile_nodata_natural_neighbor, reproject_dem, tile_dem
 from derive_drainage.stage.copdem import stage_copdem_glo30
 from derive_drainage.stage.gdw import stage_gdw
 from derive_drainage.stage.osm import stage_osm_tiles_for_dem
@@ -66,6 +66,8 @@ def run(args: argparse.Namespace) -> None:
         dem_reproj = cache_dir / "copdem_reprojected.tif"
         tiles_dir = cache_dir / "dem_tiles"
         tiles_dir.mkdir(parents=True, exist_ok=True)
+        tile_size_m = 10_000.0
+        overlap_m = 2_500.0
 
         existing_tiles = sorted(tiles_dir.glob("*.tif"))
         if existing_tiles:
@@ -86,8 +88,8 @@ def run(args: argparse.Namespace) -> None:
                 dem_path=dem_reproj,
                 aoi_geom_proj=aoi_proj_geom,
                 out_dir=tiles_dir,
-                tile_size_m=10_000.0,
-                overlap_m=2_500.0,
+                tile_size_m=tile_size_m,
+                overlap_m=overlap_m,
             )
 
         LOG.info("Staging GDW dams")
@@ -127,6 +129,9 @@ def run(args: argparse.Namespace) -> None:
 
         LOG.info("Filling erased voids via natural neighbor interpolation")
         fill_tile_nodata_natural_neighbor(tile_paths=tiles)
+
+        LOG.info("Clipping DEM tiles to core (10x10 km) by removing overlap")
+        clip_tiles_to_core(tile_paths=tiles, overlap_m=overlap_m)
 
         metadata = {
             "stac": {
