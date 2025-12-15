@@ -1,6 +1,6 @@
 # Derive drainage network
 
-Command-line tool to stage CopDEM/GDW/OSM data for an AOI, prepare DEM tiles, and derive a drainage (potential stream) network.
+Command-line tool to stage CopDEM GLO-30 data for an AOI and derive a drainage (potential stream) network.
 
 ## Usage
 
@@ -9,16 +9,14 @@ python -m derive_drainage.cli -aoi path/to/aoi.gpkg -output path/to/output --crs
 ```
 
 Key options:
-- `--buffer-km`: AOI buffer distance (km) used for staging (default 1.0).
-- `--stream-accum-threshold`: Flow accumulation threshold (cells) to start a stream (default 400).
-- `--min-stream-length-m`: Minimum stream segment length to keep (meters, default 100).
-- `--keep-temp`: Keep the temporary directory instead of removing it.
-- `-no-removal`: Skip OSM staging and DEM conditioning (erase/fill); useful if you want raw DEM tiles.
+ - `--buffer-km`: AOI buffer distance (km) used for staging (default 1.0).
+ - `--stream-accum-threshold`: Flow accumulation threshold (cells) to start a stream (default 400).
+ - `--min-stream-length-m`: Minimum stream segment length to keep (meters, default 100).
+ - `--keep-temp`: Keep the temporary directory instead of removing it.
 
 ## Outputs (in `-output`)
 
-- `cache/dem_tiles/`: Cached DEM tiles (reused on reruns).
-- `hydro/dem_mosaic.tif`: Mosaic of processed DEM tiles (after clipping/erasure/fill).
+- `hydro/dem_mosaic.tif`: Mosaic of the reprojected DEM.
 - `hydro/dem_filled.tif`: Depression-filled DEM mosaic.
 - `hydro/flow_direction.tif`: D8 flow direction raster.
 - `hydro/flow_accumulation.tif`: Flow accumulation raster (cell counts).
