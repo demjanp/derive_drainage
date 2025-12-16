@@ -96,6 +96,7 @@ def stage_copdem_glo30(
     """
     Query STAC via HTTP, download intersecting COG assets (cached), mosaic, and clip to buffered AOI.
     """
+    nodata_val = -32768.0
     cache_dir.mkdir(parents=True, exist_ok=True)
     items = _search_stac(stac_url, collection, aoi_geom_4326)
 
@@ -140,13 +141,14 @@ def stage_copdem_glo30(
     mosaic_path = Path(tmpdir) / "copdem_mosaic.tif"
     with rasterio.Env():
         datasets = [rasterio.open(p) for p in asset_paths]
-        mosaic, out_trans = merge(datasets)
+        mosaic, out_trans = merge(datasets, nodata=nodata_val)
         out_meta = datasets[0].meta.copy()
         out_meta.update(
             {
                 "height": mosaic.shape[1],
                 "width": mosaic.shape[2],
                 "transform": out_trans,
+                "nodata": nodata_val,
             }
         )
         for ds in datasets:
@@ -157,13 +159,14 @@ def stage_copdem_glo30(
     clipped_path = Path(tmpdir) / "copdem_clipped.tif"
     with rasterio.open(mosaic_path) as src:
         geom = [mapping(aoi_geom_4326)]
-        out_image, out_transform = mask(src, geom, crop=True)
+        out_image, out_transform = mask(src, geom, crop=True, nodata=nodata_val, filled=True)
         out_meta = src.meta.copy()
         out_meta.update(
             {
                 "height": out_image.shape[1],
                 "width": out_image.shape[2],
                 "transform": out_transform,
+                "nodata": nodata_val,
             }
         )
         with rasterio.open(clipped_path, "w", **out_meta) as dst:
